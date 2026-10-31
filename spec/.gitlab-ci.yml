@@ -1,0 +1,237 @@
+# Copyright 2018-2026 The Khronos Group Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+# Gitlab CI file for vulkan spec and header generation
+
+# All stages use the same Docker image, so there are no prerequisites
+# Refer to the container by its SHA instead of the name, to prevent
+# caching problems when updating the image.
+# image: khronosgroup/docker-images:asciidoctor-spec.20261007
+# There are no 'before_script' tags for most stages, because all
+# prerequisites are in the default image.
+image: khronosgroup/docker-images@sha256:368d8cd194df6a7197bf39426780ec02078b0771e4da9b906daa9e6f617dc0c1
+
+# Specify which gitlab runner to use
+default:
+  tags:
+    - khrmedium
+
+# Verify repository license compliance
+license-check:
+  stage: build
+  script:
+    - reuse lint
+  allow_failure: false
+
+# Run consistency checks on the spec and XML sources
+# Separate from the generate step to set allow_failure: false
+consistency-check:
+  stage: build
+  script:
+    # Internal self-test of the check_spec_links script
+    - ( cd scripts && pytest test*.py )
+    - mkdir -p gen/out/checks
+    # Generate a summary of problems for CI logs (if any)
+    # Override CHECK_XREFS to avoid building a redundant HTML target at this stage
+    - python3 scripts/check_spec_links.py --html=gen/out/checks/problems.html > /dev/null || true
+    - make CHECK_XREFS= allchecks
+  allow_failure: false
+
+# Check (only in main branch) for references to material that should not
+# appear in the public repository or published specifications:
+# - PROPOSED or UNRESOLVED issues in appendices
+# - Internal gitlab links in document markup
+internal-phrasing-check:
+  stage: build
+  script:
+    - make check-internal-phrasing
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "4755-links"
+
+# Consistency check for extension development branches
+# First verify that SPEC_VERSION >= 1 (-test argument)
+# Then verify that core + extension spec builds for extension development
+#   branches (-build argument)
+# This only runs on merge requests where CI_COMMIT_BRANCH is defined, and is
+# a valid extension name, or is mapped to one in an exception list in
+# scripts/testSpecVersion.py
+spec_extension_branch_check:
+  stage: build
+  script:
+    - python3 scripts/testSpecVersion.py -branch "$CI_COMMIT_BRANCH" -test -build -build_log
+  allow_failure: false
+
+# Build a test spec and check against expectation, to make sure the spec toolchain works as expected
+spec-toolchain:
+  stage: build
+  script:
+    - ./testBuild
+
+# Build the vulkan specification and generate any associated files (such as vulkan.h)
+spec-generate:
+  stage: build
+  script:
+    - NODE_PATH="/usr/lib/node_modules"
+    - export NODE_PATH
+    # Validate the XML before building anything using it
+    - make -C xml validate
+    # Build the core-only spec, to catch incorrect ifdef errors
+    - ./makeSpec -clean -spec core -genpath gencore QUIET= -j${nproc} -Otarget html
+    # Build the ratified-only spec, to catch incorrect ifdef errors affecting ratification submissions
+    - ./makeSpec -clean -spec ratified -genpath genrat QUIET= -j${nproc} -Otarget html
+    # Build the all-extensions spec as published in the registry, with other common targets
+    # The spec, refpages, and auxiliary documents are built first and the
+    # build log checked for asciidoctor warnings that cannot be made into
+    # fatal errors.
+    - ./makeSpec -clean -spec all QUIET= -j${nproc} -Otarget html manhtmlpages styleguide registry |& tee ERRS
+    - |+
+      if fgrep -q 'WARNING: skipping reference to missing attribute:' ERRS
+      then
+          echo 'Found missing (undefined) asciidoctor attributes.'
+          echo 'These are probably from commonvalidity includes where attributes are not defined.'
+          echo 'If these are reported from building a refpage, edit the corresponding part of'
+          echo 'the specification source to fix the problem.'
+          echo '----'
+          fgrep -B 1 'WARNING: skipping reference to missing attribute:' ERRS
+          false
+      else
+          true
+      fi
+    # Build the rest of the targets, without cleaning the output directory
+    - ./makeSpec -spec all QUIET= -j${nproc} -Otarget validusage
+    # Check consistency of internal xrefs and anchors in the HTML output
+    - make check-xrefs
+    # Build headers, for use by all later stages
+    - make -C xml install test vtest
+  artifacts:
+    when: always
+    paths:
+      - src/
+      - gencore/
+      - genrat/
+      - gen/
+    expire_in: 1 week
+
+# Build the vulkan sc specification and generate any associated files (such as vulkan_sc_core.h)
+vksc-generate:
+  stage: build
+  script:
+    - NODE_PATH="/usr/lib/node_modules"
+    - export NODE_PATH
+    - VULKAN_API="vulkansc"
+    - export VULKAN_API
+    # Build the all-extensions spec as published in the registry, with other common targets
+    - ./makeSpec -clean -spec all -version sc1.0 -genpath genvksc QUIET= -j${nproc} -Otarget manhtmlpages validusage styleguide registry html
+    # Check consistency of internal xrefs and anchors in the output, now
+    # that an HTML output is available
+    #- make check-xrefs
+    # Build headers, for use by all later stages
+    - ( cd xml && make GENERATED=../genvksc validate install test )
+  artifacts:
+    when: always
+    paths:
+      - genvksc/
+    expire_in: 1 week
+  allow_failure: true
+
+# Generate the vulkan base specification and generate any associated files (such as vulkan_base.h)
+vulkanbase-generate:
+  stage: build
+  script:
+    - NODE_PATH="/usr/lib/node_modules"
+    - export NODE_PATH
+    - VULKAN_API="vulkanbase"
+    - export VULKAN_API
+    # Build the actual spec HTML, and other common targets
+    - ./makeSpec -clean -spec all -version vkb1.4 -genpath genvkb QUIET= -j${nproc} -Otarget manhtmlpages validusage styleguide registry html
+    - ./makeSpec -clean -spec all -version vkc1.4 -genpath genvkc QUIET= -j${nproc} -Otarget manhtmlpages validusage styleguide registry html
+    - ./makeSpec -clean -spec all -version vkg1.4 -genpath genvkg QUIET= -j${nproc} -Otarget manhtmlpages validusage styleguide registry html
+    # Check consistency of internal xrefs and anchors in the output, now
+    # that an HTML output is available
+    #- make check-xrefs
+    # Build headers, for use by all later stages
+    - ( cd xml && make GENERATED=../genvkb install test GENOPTS="-feature VK_BASE_VERSION_1_0 -feature VK_BASE_VERSION_1_1 -feature VK_BASE_VERSION_1_2 -feature VK_BASE_VERSION_1_3 -feature VK_BASE_VERSION_1_4  -emitExtensions '^$$'" )
+    - ( cd xml && make GENERATED=../genvkc install test GENOPTS="-feature VK_BASE_VERSION_1_0 -feature VK_COMPUTE_VERSION_1_0 -feature VK_BASE_VERSION_1_1 -feature VK_COMPUTE_VERSION_1_1 -feature VK_BASE_VERSION_1_2 -feature VK_COMPUTE_VERSION_1_2 -feature VK_BASE_VERSION_1_3 -feature VK_COMPUTE_VERSION_1_3 -feature VK_BASE_VERSION_1_4 -feature VK_COMPUTE_VERSION_1_4 -emitExtensions '^$$'" )
+    - ( cd xml && make GENERATED=../genvkg install test GENOPTS="-feature VK_BASE_VERSION_1_0 -feature VK_COMPUTE_VERSION_1_0 -feature VK_GRAPHICS_VERSION_1_0 -feature VK_BASE_VERSION_1_1 -feature VK_COMPUTE_VERSION_1_1 -feature VK_GRAPHICS_VERSION_1_1 -feature VK_BASE_VERSION_1_2 -feature VK_COMPUTE_VERSION_1_2 -feature VK_GRAPHICS_VERSION_1_2 -feature VK_BASE_VERSION_1_3 -feature VK_COMPUTE_VERSION_1_3 -feature VK_GRAPHICS_VERSION_1_3 -feature VK_BASE_VERSION_1_4 -feature VK_COMPUTE_VERSION_1_4 -feature VK_GRAPHICS_VERSION_1_4 -emitExtensions '^$$'" )
+  artifacts:
+    when: always
+    paths:
+      - genvkb/
+      - genvkc/
+      - genvkg/
+    expire_in: 1 weeks
+  allow_failure: true
+
+# Generate the vulkan C++ header (vulkan.hpp)
+hpp-generate:
+  stage: build
+  before_script:
+    - SPEC_DIR="${PWD}"
+    - cd /tmp
+    - rm -rf Vulkan-Hpp
+    - git clone https://github.com/KhronosGroup/Vulkan-Hpp.git
+    - cd Vulkan-Hpp
+    - git submodule update --init --recursive -- tinyxml2
+    - rm -rf Vulkan-Docs
+    - cp -r "${SPEC_DIR}" Vulkan-Docs
+    # Copy Vulkan C headers into subdir copy used by Vulkan-Hpp
+    - cp -p ${SPEC_DIR}/include/vulkan/*.h Vulkan-Docs/include/vulkan/
+  script:
+    - cd /tmp/Vulkan-Hpp
+    - cmake -H. -Bbuild
+    - make -C build
+    - cd build
+    - ./VulkanHppGenerator -f "${SPEC_DIR}"/xml/vk.xml
+  after_script:
+    - mkdir -p Vulkan-Hpp/vulkan/
+    - cp /tmp/Vulkan-Hpp/vulkan/*.hpp Vulkan-Hpp/vulkan/
+  artifacts:
+    paths:
+      - Vulkan-Hpp/vulkan/
+    expire_in: 1 week
+  allow_failure: true
+
+# Run the CTS Vulkan framework tests, to make sure XML changes will not
+# cause problems there.
+cts-framework-tests:
+  stage: build
+  script:
+    # Clone the CTS GitHub repository.
+    # Use sparse / shallow clone since the repo is enormous and mostly not needed for these tests
+    - git clone --sparse --depth 1 --single-branch --branch main https://github.com/KhronosGroup/VK-GL-CTS.git
+    - cd VK-GL-CTS
+    # Add sparse checkout paths for required directories
+    - git sparse-checkout add scripts external/vulkancts/framework external/vulkancts/scripts
+    # Link the spec project into CTS hierarchy, instead of cloning it
+    - mkdir external/vulkan-docs
+    - ln -s `cd .. ; pwd` external/vulkan-docs/src
+    # Run the Vulkan-specific tests (from scripts/check_build_sanity.py) # codespell:allow sanity
+    - python3 external/vulkancts/scripts/gen_framework.py --api vulkan
+    - python3 external/vulkancts/scripts/gen_framework.py --api vulkansc
+  allow_failure: true
+
+# Compile a simple test program that uses vulkan.h
+# The fake platform headers in tests/ allow compiling with all Vulkan
+# platforms at once.
+h-compile:
+  stage: test
+  needs:
+    - spec-generate
+  script:
+    - gcc -c -std=c11 -Igen/include -Itests -Wall -Wextra -Werror tests/htest.c
+    - clang -c -std=c11 -Igen/include -Itests -Wall -Wextra -Werror tests/htest.c
+
+# Compile a simple test program that uses vulkan.hpp
+hpp-compile:
+  stage: test
+  needs:
+    - spec-generate
+    - hpp-generate
+  parallel:
+    matrix:
+      - cpp_standard: [c++11, c++14, c++17, c++20]
+  script:
+    - g++ -c -std=$cpp_standard -Igen/include -IVulkan-Hpp -Wall -Wextra -Werror -Wpedantic tests/hpptest.cpp
+    - clang++ -c -std=$cpp_standard -Igen/include -IVulkan-Hpp -Wall -Wextra -Werror -Wpedantic tests/hpptest.cpp
+  allow_failure: true

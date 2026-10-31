@@ -1,0 +1,101 @@
+:pp: {plus}{plus}
+
+= Embedded & Safety Critical Systems
+
+== Introduction: Managing the Minimums
+
+Embedded systems — the Raspberry Pi, NVIDIA Jetson boards, or custom SoC hardware — are the most constrained environments in the Vulkan ecosystem. You're often working with a single gigabyte of shared memory and a CPU that's a fraction of the speed of a desktop processor. There's little room for approximate answers here.
+
+An AI assistant can help by continuously checking your resource allocation against hard hardware limits and by suggesting the aggressive quantization needed to fit modern graphics techniques into a small silicon footprint. Treat its output as a starting point to verify against your actual device profile, not as a guarantee of correctness.
+
+== Tutorial: Managing the Embedded Memory Map
+
+Embedded development is about hard limits rather than reasonable defaults. Use your assistant to audit your resource allocation against the specific constraints of your SoC.
+
+=== Step 1: Loading the Hardware Profile
+
+Feed the assistant your device's memory map and the requirements for your target resolution.
+
+[source,text]
+----
+I am developing for an NVIDIA Jetson Nano with 4GB of
+unified memory. 512MB is reserved for the display
+controller and OS. Our target is 1080p triple-buffered.
+
+Analyze our 'PoolAllocator.cpp'. We are pre-allocating
+five 64MB heaps. Will this leave enough headroom
+for the swapchain and our G-Buffer?
+----
+
+=== Step 2: Optimizing the Allocation
+
+Once you have the audit results, ask for a refactored allocation strategy that reduces wasted padding.
+
+[source,cpp]
+----
+// Example memory allocation for embedded targets
+VkMemoryAllocateInfo allocInfo = {};
+allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+allocInfo.allocationSize = reclaimedSize; // Optimized size
+// The assistant can suggest specific memory types for the Jetson's unified memory
+allocInfo.memoryTypeIndex = unifiedMemoryIndex;
+----
+
+== Tutorial: Shader Quantization for Mali/Adreno
+
+On embedded systems, shader precision has a direct effect on power consumption. Downgrading variables to `mediump` (FP16) can noticeably improve performance, though it comes with a real risk of visible artifacts if applied carelessly.
+
+=== Step 1: The Precision Audit
+
+Give the assistant your fragment shader and ask it to identify candidates for quantization, then check its suggestions against your own visual testing rather than taking them on faith.
+
+[source,text]
+----
+Audit 'PBR.frag' for a Mali-G710 GPU.
+Which variables can we safely downgrade to 'mediump'
+(FP16) without causing visible artifacts in our
+specular reflections or normal mapping?
+----
+
+=== Step 2: Applying the Quantization
+
+Review the refactored shader it proposes. Switching to `mediump` for normalization and intermediate lighting steps reduces register pressure, which allows more threads to run in parallel — but verify the visual result before committing to it.
+
+[source,glsl]
+----
+// Fragment shader using FP16 intermediates for embedded targets
+layout(location = 0) out vec4 outColor;
+void main() {
+    mediump vec3 normal = normalize(inNormal);
+    mediump vec3 lightDir = normalize(uBo.lightPos - inPos);
+    // ... lighting calculations at FP16 ...
+}
+----
+
+== Tutorial: Vulkan SC Compliance Check
+
+In automotive and industrial environments, Vulkan SC requires every resource to be pre-allocated ahead of time. This is a case where you should treat AI output as a first pass, not a certification — actual SC compliance needs to be verified against the spec and your certification process, not just an assistant's opinion.
+
+=== Step 1: The Compliance Audit
+
+Feed your initialization sequence to the assistant and ask it to check for SC 1.0 violations.
+
+[source,text]
+----
+Audit 'VulkanContext::initializeSC'.
+Check if our 'PipelineCache' warming logic is compliant
+with the Vulkan SC 1.0 specification for offline compilation.
+Are we using any illegal dynamic state like 'VK_DYNAMIC_STATE_LINE_WIDTH'?
+----
+
+=== Step 2: The SC Refactor
+
+If it finds a violation, such as dynamic line width, ask it to generate the pre-baked pipeline array needed to stay compliant, then confirm the result yourself against the spec.
+
+== Summary
+
+Embedded deployment comes down to working within hard memory and CPU budgets. AI can help audit allocations and suggest quantization strategies, but this is one of the areas in this series where the assistant's output deserves the most scrutiny — the cost of an error is a device that doesn't work, not just a slower frame.
+
+That covers desktop, mobile, and embedded deployment. The next section is a FAQ and a capstone project that ties the tools from this series together.
+
+Next: xref:AI_Assisted_Vulkan/09_faq.adoc[Common Questions & Troubleshooting (FAQ)]

@@ -1,0 +1,38 @@
+:pp: {plus}{plus}
+
+= Pro-Level Debugging with AI & RenderDoc
+
+== Introduction
+
+Vulkan debugging is usually a search problem: you get a cryptic **Validation Layer Error (VUID)**, or worse, a black screen, and you have to trace through pipeline state, synchronization barriers, and shader logic to find the one bit that's wrong.
+
+An AI assistant can help here by acting as a diagnostic aid rather than just a code generator: given the right context, it can correlate error strings, GPU state, and your source code faster than you can do it by hand. This section covers how to set that up.
+
+== Three sources of evidence
+
+A debugging session usually draws on three sources of truth:
+
+1.  **VUIDs.** The specific error strings from the Vulkan Validation Layers. These tell you *what* rule you broke.
+2.  **RenderDoc state.** The raw state of the GPU — pipelines, descriptors, buffers — at the moment of the draw call. This tells you what the GPU actually saw.
+3.  **The AI's reasoning over both.** When you give an assistant the VUID, the RenderDoc state, and your C{pp} source together, it can often connect them faster than manually cross-referencing all three yourself.
+
+== Why use AI for Vulkan debugging
+
+Vulkan's validation errors are accurate but dense. A VUID like `VUID-VkGraphicsPipelineCreateInfo-pStages-01565` tells you exactly what's wrong, but not always where to look. Feeding these strings and GPU captures to an assistant can help with:
+
+*   **Translating VUIDs.** Turning a dense "image layout mismatch" message into a plain explanation, plus likely locations in your code where the transition was missed.
+*   **Reading GPU state.** Scanning a RenderDoc capture to find why a descriptor set is incompatible with a pipeline, instead of comparing fields by hand.
+*   **Reasoning about shader values.** Taking the input values for a specific failing pixel and checking them against your HLSL or Slang logic to catch mistakes the compiler wouldn't flag.
+
+It won't replace understanding what the validation layers and RenderDoc are telling you — treat it as a way to cut down the manual cross-referencing, not as a black box that produces answers you don't need to check.
+
+== What's in this section
+
+1.  **xref:AI_Assisted_Vulkan/06_debugging/02_vuid_autofix.adoc[VUID Auto-Fix]:** Turning a raw validation error string into a targeted code fix.
+2.  **xref:AI_Assisted_Vulkan/06_debugging/03_renderdoc_ai_integration.adoc[AI + RenderDoc Integration]:** Using an agent to read GPU captures and flag redundant state changes or sync hazards.
+3.  **xref:AI_Assisted_Vulkan/06_debugging/04_shader_debugging_logs.adoc[Shader Logs & API Dumps]:** Feeding large API logs to an assistant to find the source of a state mismatch.
+4.  **xref:AI_Assisted_Vulkan/06_debugging/05_gfxreconstruct_ai.adoc[AI + GFXReconstruct]:** Capturing and auditing multi-frame Vulkan call streams for driver regressions and resource lifecycle issues.
+
+By the end, you'll have a repeatable process for working through Vulkan validation and rendering bugs with an assistant in the loop.
+
+Next: xref:AI_Assisted_Vulkan/06_debugging/02_vuid_autofix.adoc[VUID Auto-Fix]

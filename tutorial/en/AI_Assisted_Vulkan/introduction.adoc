@@ -1,0 +1,46 @@
+:pp: {plus}{plus}
+
+= AI-Assisted Vulkan Development
+
+== Introduction
+
+Say your validation layers throw a `VUID-VkImageMemoryBarrier-oldLayout-01197` error somewhere in a custom frame graph. Without help, you're looking at the Vulkan spec, tracing image layout transitions by hand, and following the texture's lifecycle back through however many files touch it.
+
+An AI assistant that has indexed your engine and the current Vulkan registry can shortcut a lot of that: it can point at the mismatch, find the missing barrier even if it's in an unrelated file, and sometimes suggest a cleaner synchronization pattern than the one you were about to write. It isn't magic and it isn't always right, but used well it removes a lot of the tedious lookup work so you can spend more time on the actual design problem.
+
+This series is about using that capability deliberately, with a clear sense of where it helps and where it doesn't.
+
+== Why this is worth doing for Vulkan specifically
+
+Vulkan is verbose by design. A lot of the initial difficulty in learning it comes from boilerplate and explicit state tracking rather than from the underlying graphics concepts, and that's exactly the kind of work LLMs tend to handle reasonably well, for a few reasons:
+
+1.  **Vulkan's strictness helps the model.** Structs, bitmasks, and enums give an LLM a much narrower space of valid answers than a dynamically typed language would. That doesn't eliminate hallucination, but it makes it easier to catch.
+2.  **The spec is machine-readable.** Using the Model Context Protocol (MCP), you can give your assistant direct access to `vk.xml` so it can look up an extension or struct instead of guessing from training data that may be a version or two out of date.
+3.  **Vision-capable models can read screenshots.** You can hand a multimodal model a frame capture and ask about shadow acne, z-fighting, or texture bleeding, which is a reasonable starting point for tracking down the cause.
+
+None of this replaces understanding what the API is doing. It's a way to spend less time on lookup and boilerplate, and more time on the parts of the problem that actually need judgment.
+
+== Who is the audience?
+
+This series is for **intermediate Vulkan developers** who have completed the core xref:00_Introduction.adoc[Vulkan Tutorial]. You should already be comfortable with pipelines, descriptor sets, and the usual queue-presentation pitfalls. If you want a practical look at where AI tooling fits into a C{pp} graphics workflow, and where it doesn't, this series is for you.
+
+== The toolset
+
+The series uses two kinds of models: cloud models with strong reasoning, for structural planning and math-heavy problems, and local models running through Ollama, for fast, private, everyday completion and chat. Which one is worth using depends on the task, your hardware, and your tolerance for sending code off-machine; later chapters go into the tradeoffs rather than treating either category as a default choice. The other piece is the **Context Bridge** (MCP and RAG), which gives your assistant access to your engine's actual coding conventions and the current Vulkan API surface, instead of relying only on whatever the model happened to see during training.
+
+== The roadmap: what we will build
+
+Throughout this tutorial, we will build up an AI-assisted development setup piece by piece:
+
+1.  **xref:AI_Assisted_Vulkan/02_environment_setup/01_introduction.adoc[The AI Toolbelt]:** Setting up your IDE (CLion, Android Studio, Visual Studio, or Xcode) with AI assistance and configuring your first agent.
+2.  **xref:AI_Assisted_Vulkan/03_model_selection_specialization/01_introduction.adoc[Model Selection & Specialization]:** VRAM budgeting, quantization, and picking a model that's actually a good fit for the task.
+3.  **xref:AI_Assisted_Vulkan/04_multimodal_ai/01_introduction.adoc[Multimodal AI]:** Diagnosing visual bugs by handing frame captures to a vision-capable model.
+4.  **xref:AI_Assisted_Vulkan/05_workflow/01_introduction.adoc[Workflow: System Design to Implementation]:** Moving from high-level planning to shader implementation with AI in the loop.
+5.  **xref:AI_Assisted_Vulkan/06_debugging/01_introduction.adoc[Pro-Level Debugging]:** Using AI to work through validation layer errors and RenderDoc captures.
+6.  **xref:AI_Assisted_Vulkan/07_advanced_mcp/01_introduction.adoc[Advanced MCP Tooling]:** Building custom tools so your AI can query hardware limits and the Vulkan Registry directly.
+7.  **xref:AI_Assisted_Vulkan/08_deployment/01_introduction.adoc[Deployment Automation]:** Streamlining the path to Android, iOS, and Desktop.
+8.  **xref:AI_Assisted_Vulkan/10_final_project.adoc[Capstone Project]:** A Dual-Filtering Blur implementation that uses the tools covered throughout the series.
+
+By the end, you should be able to use current AI models to build complex graphics systems faster, without losing track of what the code is actually doing.
+
+Let's begin: xref:AI_Assisted_Vulkan/02_environment_setup/01_introduction.adoc[Next: The AI Toolbelt]

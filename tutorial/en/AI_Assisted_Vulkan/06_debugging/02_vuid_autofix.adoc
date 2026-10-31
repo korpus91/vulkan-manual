@@ -1,0 +1,93 @@
+:pp: {plus}{plus}
+
+= VUID Auto-Fix: Working Through Validation Layers
+
+== Introduction
+
+Vulkan **Validation Layers** are one of the most useful tools you have — they catch a huge range of errors, from bad struct sizes to subtle synchronization hazards. But a single validation error can be dense enough to be hard to parse, especially if you're newer to Vulkan.
+
+An AI assistant can help by correlating the VUID (Valid Usage ID) with your actual C{pp} source to suggest a specific fix, rather than leaving you to decode the error string on your own.
+
+== VUID, location, and spec context
+
+A useful auto-fix workflow combines three pieces of information: the **VUID** itself (a stable identifier for a specific rule in the Vulkan Specification), the **location** in your C{pp} source where the offending call happens, and the **spec context** — the actual rule text, which an MCP server can pull live from `vk.xml` so the assistant isn't relying on outdated training data.
+
+With all three, the assistant can tell you not just that there's a type mismatch, but that your shader expects a `storage_buffer` because you're writing to it, while your C{pp} code declares it as a `uniform_buffer` — and propose a fix consistent with the rest of your code.
+
+== Example: a descriptor mismatch
+
+Say you're implementing a bindless texture system, and you run the app to see this:
+
+[source,text]
+----
+VALIDATION ERROR: [ VUID-VkDescriptorSetLayoutBinding-descriptorType-01510 ]
+Object: 0x5555559868f0 | Message: pBindings[0].descriptorType is VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+but shader expects VK_DESCRIPTOR_TYPE_STORAGE_BUFFER...
+----
+
+=== Step 1: Ask with context
+
+Give the assistant the error and the relevant code, not just the error alone.
+
+**Prompt:** *"I am getting this VUID: [PASTE ERROR]. Here is my `DescriptorSetLayout` creation code: [PASTE CODE]. Based on our engine's `Buffer` class, why is this type mismatch occurring?"*
+
+=== Step 2: Let it correlate shader and C{pp} code
+
+With RAG access to your shader code and your C{pp} initialization, a reasonable response looks like:
+
+**"Your shader is expecting a `storage_buffer` because you are writing to it in the fragment stage. However, your C{pp} code is initializing it as a `uniform_buffer`. You must update the descriptor type to `STORAGE_BUFFER` and ensure your `VkBufferUsageFlags` include the `STORAGE_BUFFER_BIT`."**
+
+=== Step 3: Apply the fix
+
+A good assistant will give you the change in the style of your existing RAII wrappers, and will flag secondary effects — for example, that this change might push you over your `maxDescriptorSetStorageBuffers` limit, which is easy to miss even for an experienced developer.
+
+== Keeping the VUID list current
+
+One genuinely useful part of this workflow is having MCP query the live Vulkan spec, as covered in xref:AI_Assisted_Vulkan/02_environment_setup/06_mcp_context_bridge.adoc[The Context Bridge]. Your assistant can read the `vk.xml` file on disk directly, so a VUID introduced in a newer Vulkan version is available to it the same day you update your SDK, regardless of when the underlying model was trained.
+
+== Practical steps: performing a VUID auto-fix
+
+=== Step 1: Isolate and load context
+
+Copy the VUID string from your terminal, then make sure the relevant code is loaded into your assistant (Goose or IDE chat).
+
+[source,bash]
+----
+# Example: Pointing Goose to the renderer and shader code
+goose session --instruction "Analyze Renderer.cpp and main.frag. We have a VUID error to solve."
+----
+
+=== Step 2: Ask for the correlation
+
+Provide the exact error and ask for it to be checked against your engine's logic.
+
+[source,text]
+----
+I am encountering this validation error:
+[ VUID-VkDescriptorSetLayoutBinding-descriptorType-01510 ]
+Message: pBindings[0].descriptorType is VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+but shader expects VK_DESCRIPTOR_TYPE_STORAGE_BUFFER.
+
+Based on our 'DescriptorSetManager' class, why is this mismatch occurring?
+----
+
+=== Step 3: Verify before applying
+
+Before applying a suggested fix, ask it to check for side effects elsewhere in the pipeline.
+
+[source,text]
+----
+Explain why changing to STORAGE_BUFFER resolves this rule.
+Will this require any changes to our memory alignment logic or
+buffer usage flags in 'Buffer.cpp'?
+----
+
+Apply the fix and re-run your application. If the validation layer stays quiet, the fix worked.
+
+In an IDE chat interface, this often reduces to pasting the VUID and letting the assistant find and fix the issue directly — it's a fast path that works well for common cases. The explicit prompt structure above is worth using with local models, which tend to do better with a clearly scoped request than with an open-ended "fix this."
+
+== Summary
+
+Using AI to bridge validation errors and source code cuts out a lot of the manual cross-referencing between the spec, the error string, and your code. It's still worth checking the reasoning, especially for anything touching memory layout or synchronization — but for routine VUID triage, it saves real time.
+
+Next: xref:AI_Assisted_Vulkan/06_debugging/03_renderdoc_ai_integration.adoc[AI + RenderDoc Integration]

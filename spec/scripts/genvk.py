@@ -1,0 +1,1011 @@
+#!/usr/bin/env python3
+#
+# Copyright 2013-2026 The Khronos Group Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+import argparse
+import os
+import pdb
+import re
+import sys
+import copy
+import time
+import xml.etree.ElementTree as etree
+
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+
+from cgenerator import CGeneratorOptions, COutputGenerator
+from reflib import logDiag, logWarn, logErr, setLogFile
+from reg import Registry
+from apiconventions import APIConventions
+from extdependency import ApiDependencies
+
+# Simple timer functions
+startTime = None
+
+
+def startTimer(timeit):
+    global startTime
+    if timeit:
+        startTime = time.process_time()
+
+
+def endTimer(timeit, msg):
+    global startTime
+    if timeit and startTime is not None:
+        endTime = time.process_time()
+        logDiag(msg, endTime - startTime)
+        startTime = None
+
+
+def makeREstring(strings, default=None, strings_are_regex=False):
+    """Turn an iterable of strings into a regexp exactly matching those strings."""
+    if strings or default is None:
+        if not strings_are_regex:
+            strings = (re.escape(s) for s in strings)
+        return f"^({'|'.join(strings)})$"
+    return default
+
+
+def makeGenOpts(args):
+    """Returns a directory of [ generator function, generator options ] indexed
+    by specified short names. The generator options incorporate the following
+    parameters:
+
+    args is a parsed argument object; see below for the fields that are used."""
+    global genOpts
+    genOpts = {}
+
+    # Default class of extensions to include, or None
+    defaultExtensions = args.defaultExtensions
+
+    # Additional extensions to include (set of extension names)
+    extensions = args.extension
+
+    # Extensions to remove (list of extensions)
+    removeExtensions = args.removeExtensions
+
+    # Extensions to emit (list of extensions)
+    emitExtensions = args.emitExtensions
+
+    # SPIR-V capabilities / features to emit (list of extensions & capabilities)
+    emitSpirv = args.emitSpirv
+
+    # Vulkan Formats to emit
+    emitFormats = args.emitFormats
+
+    # VkDynamicState to emit
+    emitDynamicState = args.emitDynamicState
+
+    # Features to include (set of feature names)
+    features = args.feature
+
+    # Whether to disable inclusion protect in headers
+    protect = args.protect
+
+    # Whether to enable internal API merging
+    mergeInternalApis = args.mergeInternalApis
+
+    # Output target directory
+    directory = args.directory
+
+    # Path to generated files, particularly apimap.py
+    genpath = args.genpath
+
+    # Generate MISRA C-friendly headers
+    misracstyle = args.misracstyle
+
+    # Generate MISRA C++-friendly headers
+    misracppstyle = args.misracppstyle
+
+    # Descriptive names for various regexp patterns used to select
+    # versions and extensions
+    allFormats = allDynamicState = allSpirv = allFeatures = allExtensions = r'.*'
+
+    # Turn lists of names/patterns into matching regular expressions
+    addExtensionsPat     = makeREstring(extensions, None)
+    removeExtensionsPat  = makeREstring(removeExtensions, None)
+    emitExtensionsPat    = makeREstring(emitExtensions, allExtensions)
+    emitSpirvPat         = makeREstring(emitSpirv, allSpirv)
+    emitFormatsPat       = makeREstring(emitFormats, allFormats)
+    emitDynamicState     = makeREstring(emitDynamicState, allDynamicState)
+    featuresPat          = makeREstring(features, allFeatures)
+
+    # Copyright text prefixing all headers (list of strings).
+    # The SPDX formatting below works around constraints of the 'reuse' tool
+    prefixStrings = [
+        '/*',
+        '** Copyright 2015-2026 The Khronos Group Inc.',
+        '**',
+        '** SPDX-License-Identifier' + ': Apache-2.0 OR MIT',
+        '*/',
+        ''
+    ]
+
+    # Text specific to Vulkan headers
+    vkPrefixStrings = [
+        '/*',
+        '** This header is generated from the Khronos Vulkan XML API Registry.',
+        '**',
+        '*/',
+        ''
+    ]
+
+    # Defaults for generating re-inclusion protection wrappers (or not)
+    protectFile = protect
+
+    # An API style conventions object
+    conventions = APIConventions()
+
+    if args.apiname is not None:
+        defaultAPIName = args.apiname
+    else:
+        defaultAPIName = conventions.xml_api_name
+
+    # APIs to merge
+    mergeApiNames = args.mergeApiNames
+
+    if defaultAPIName == "vulkanbase":
+        mergeInternalApis = False
+
+    # Try to set up specification generators if the needed modules are available
+    try:
+        from docgenerator import DocGeneratorOptions, DocOutputGenerator
+        from jsgenerator import JSOutputGenerator
+        from pygenerator import PyOutputGenerator
+        from rubygenerator import RubyOutputGenerator
+        from validitygenerator import ValidityOutputGenerator
+        from hostsyncgenerator import HostSynchronizationOutputGenerator
+        from extensionmetadocgenerator import (ExtensionMetaDocGeneratorOptions,
+                                            ExtensionMetaDocOutputGenerator)
+        from interfacedocgenerator import InterfaceDocGenerator
+        from featurerequirementsgenerator import FeatureRequirementsDocGenerator
+        from spirvcapgenerator import SpirvCapabilityOutputGenerator
+        from formatsgenerator import FormatsOutputGenerator
+        from syncgenerator import SyncOutputGenerator
+        from dynamicstategenerator import DynamicStateOutputGenerator
+        from base_generator import BaseGeneratorOptions
+
+        # API include files for spec and ref pages
+        # Overwrites include subdirectories in spec source tree
+        # The generated include files do not include the calling convention
+        # macros (apientry etc.), unlike the header files.
+        # Because the 1.0 core branch includes ref pages for extensions,
+        # all the extension interfaces need to be generated, even though
+        # none are used by the core spec itself.
+        genOpts['apiinc'] = [
+            DocOutputGenerator,
+            DocGeneratorOptions(
+                conventions       = conventions,
+                filename          = 'timeMarker',
+                directory         = directory,
+                genpath           = genpath,
+                apiname           = defaultAPIName,
+                mergeInternalApis = mergeInternalApis,
+                profile           = None,
+                versions          = featuresPat,
+                emitversions      = featuresPat,
+                defaultExtensions = None,
+                addExtensions     = addExtensionsPat,
+                removeExtensions  = removeExtensionsPat,
+                emitExtensions    = emitExtensionsPat,
+                prefixText        = prefixStrings + vkPrefixStrings,
+                apicall           = '',
+                apientry          = '',
+                apientryp         = '*',
+                alignFuncParam    = 48,
+                expandEnumerants  = False)
+            ]
+
+        # JavaScript, Python, and Ruby representations of API information, used
+        # by scripts that do not need to load the full XML.
+        genOpts['apimap.cjs'] = [
+            JSOutputGenerator,
+            DocGeneratorOptions(
+                conventions       = conventions,
+                filename          = 'apimap.cjs',
+                directory         = directory,
+                genpath           = None,
+                apiname           = defaultAPIName,
+                mergeInternalApis = mergeInternalApis,
+                profile           = None,
+                versions          = featuresPat,
+                emitversions      = featuresPat,
+                defaultExtensions = None,
+                addExtensions     = addExtensionsPat,
+                removeExtensions  = removeExtensionsPat,
+                emitExtensions    = emitExtensionsPat,
+                reparentEnums     = False)
+            ]
+
+        genOpts['apimap.py'] = [
+            PyOutputGenerator,
+            DocGeneratorOptions(
+                conventions       = conventions,
+                filename          = 'apimap.py',
+                directory         = directory,
+                genpath           = None,
+                apiname           = defaultAPIName,
+                mergeInternalApis = mergeInternalApis,
+                profile           = None,
+                versions          = featuresPat,
+                emitversions      = featuresPat,
+                defaultExtensions = None,
+                addExtensions     = addExtensionsPat,
+                removeExtensions  = removeExtensionsPat,
+                emitExtensions    = emitExtensionsPat,
+                reparentEnums     = False)
+            ]
+
+        genOpts['apimap.rb'] = [
+            RubyOutputGenerator,
+            DocGeneratorOptions(
+                conventions       = conventions,
+                filename          = 'apimap.rb',
+                directory         = directory,
+                genpath           = None,
+                apiname           = defaultAPIName,
+                mergeInternalApis = mergeInternalApis,
+                profile           = None,
+                versions          = featuresPat,
+                emitversions      = featuresPat,
+                defaultExtensions = None,
+                addExtensions     = addExtensionsPat,
+                removeExtensions  = removeExtensionsPat,
+                emitExtensions    = emitExtensionsPat,
+                reparentEnums     = False)
+            ]
+
+        # API validity files for spec
+        #
+        # requireCommandAliases is set to True because we need validity files
+        # for the command something is promoted to even when the promoted-to
+        # feature is not included. This avoids wordy includes of validity files.
+        genOpts['validinc'] = [
+            ValidityOutputGenerator,
+            DocGeneratorOptions(
+                conventions       = conventions,
+                filename          = 'timeMarker',
+                directory         = directory,
+                genpath           = None,
+                apiname           = defaultAPIName,
+                mergeInternalApis = mergeInternalApis,
+                profile           = None,
+                versions          = featuresPat,
+                emitversions      = featuresPat,
+                defaultExtensions = None,
+                addExtensions     = addExtensionsPat,
+                removeExtensions  = removeExtensionsPat,
+                emitExtensions    = emitExtensionsPat,
+                requireCommandAliases = True,
+                )
+            ]
+
+        # API host sync table files for spec
+        genOpts['hostsyncinc'] = [
+            HostSynchronizationOutputGenerator,
+            DocGeneratorOptions(
+                conventions       = conventions,
+                filename          = 'timeMarker',
+                directory         = directory,
+                genpath           = None,
+                apiname           = defaultAPIName,
+                mergeInternalApis = mergeInternalApis,
+                profile           = None,
+                versions          = featuresPat,
+                emitversions      = featuresPat,
+                defaultExtensions = None,
+                addExtensions     = addExtensionsPat,
+                removeExtensions  = removeExtensionsPat,
+                emitExtensions    = emitExtensionsPat,
+                reparentEnums     = False)
+            ]
+
+        # Extension metainformation for spec extension appendices
+        # Includes all extensions by default, but only so that the generated
+        # 'promoted_extensions_*' files refer to all extensions that were
+        # promoted to a core version.
+        genOpts['extinc'] = [
+            ExtensionMetaDocOutputGenerator,
+            ExtensionMetaDocGeneratorOptions(
+                conventions       = conventions,
+                filename          = 'timeMarker',
+                directory         = directory,
+                genpath           = None,
+                apiname           = defaultAPIName,
+                mergeInternalApis = mergeInternalApis,
+                profile           = None,
+                versions          = featuresPat,
+                emitversions      = None,
+                defaultExtensions = defaultExtensions,
+                addExtensions     = addExtensionsPat,
+                removeExtensions  = None,
+                emitExtensions    = emitExtensionsPat)
+            ]
+
+        # Version and extension interface docs for version/extension appendices
+        # Includes all extensions by default.
+        genOpts['interfaceinc'] = [
+            InterfaceDocGenerator,
+            DocGeneratorOptions(
+                conventions       = conventions,
+                filename          = 'timeMarker',
+                directory         = directory,
+                genpath           = None,
+                apiname           = defaultAPIName,
+                mergeInternalApis = mergeInternalApis,
+                profile           = None,
+                versions          = featuresPat,
+                emitversions      = featuresPat,
+                defaultExtensions = None,
+                addExtensions     = addExtensionsPat,
+                removeExtensions  = removeExtensionsPat,
+                emitExtensions    = emitExtensionsPat,
+                reparentEnums     = False)
+            ]
+
+        # Feature requirements for versions/extensions
+        # Includes all extensions by default.
+        genOpts['requirementsinc'] = [
+              FeatureRequirementsDocGenerator,
+              DocGeneratorOptions(
+                conventions       = conventions,
+                filename          = 'featurerequirements.adoc',
+                directory         = directory,
+                genpath           = None,
+                apiname           = defaultAPIName,
+                mergeInternalApis = mergeInternalApis,
+                profile           = None,
+                versions          = featuresPat,
+                emitversions      = featuresPat,
+                defaultExtensions = addExtensionsPat,
+                addExtensions     = addExtensionsPat,
+                removeExtensions  = removeExtensionsPat,
+                emitExtensions    = emitExtensionsPat)
+            ]
+
+        genOpts['spirvcapinc'] = [
+            SpirvCapabilityOutputGenerator,
+            DocGeneratorOptions(
+                conventions       = conventions,
+                filename          = 'timeMarker',
+                directory         = directory,
+                genpath           = None,
+                apiname           = defaultAPIName,
+                mergeInternalApis = mergeInternalApis,
+                profile           = None,
+                versions          = featuresPat,
+                emitversions      = featuresPat,
+                defaultExtensions = None,
+                addExtensions     = addExtensionsPat,
+                removeExtensions  = removeExtensionsPat,
+                emitExtensions    = emitExtensionsPat,
+                emitSpirv         = emitSpirvPat,
+                reparentEnums     = False)
+            ]
+
+        # Used to generate various format chapter tables
+        genOpts['formatsinc'] = [
+            FormatsOutputGenerator,
+            DocGeneratorOptions(
+                conventions       = conventions,
+                filename          = 'timeMarker',
+                directory         = directory,
+                genpath           = None,
+                apiname           = defaultAPIName,
+                mergeInternalApis = mergeInternalApis,
+                profile           = None,
+                versions          = featuresPat,
+                emitversions      = featuresPat,
+                defaultExtensions = None,
+                addExtensions     = addExtensionsPat,
+                removeExtensions  = removeExtensionsPat,
+                emitExtensions    = emitExtensionsPat,
+                emitFormats       = emitFormatsPat,
+                reparentEnums     = False)
+            ]
+
+        # Used to generate various synchronization chapter tables
+        genOpts['syncinc'] = [
+            SyncOutputGenerator,
+            DocGeneratorOptions(
+                conventions       = conventions,
+                filename          = 'timeMarker',
+                directory         = directory,
+                genpath           = None,
+                apiname           = defaultAPIName,
+                mergeInternalApis = mergeInternalApis,
+                profile           = None,
+                versions          = featuresPat,
+                emitversions      = featuresPat,
+                defaultExtensions = None,
+                addExtensions     = addExtensionsPat,
+                removeExtensions  = removeExtensionsPat,
+                emitExtensions    = emitExtensionsPat,
+                reparentEnums     = False)
+            ]
+
+        genOpts['dynamicstateinc'] = [
+            DynamicStateOutputGenerator,
+            BaseGeneratorOptions(
+                customFileName      = 'timeMarker',
+                customDirectory     = directory,
+                customApiName       = defaultAPIName,
+                customMergedApiName = mergeApiNames)
+            ]
+
+    except ImportError:
+        # Module dependencies are not available for spec generation
+        pass
+
+    # Track all platform extensions, for exclusion from vulkan_core.h
+    allPlatformExtensions = set()
+
+    # Setup generators for platform header files
+    # For each platform, determines the extensions which are part of the
+    # platform, and the extensions on which the platform extensions depend.
+    # The platform header name is usually based on the platform attribute in
+    # the XML, but can be overridden as needed.
+
+    deps = ApiDependencies(args.registry)
+
+    for platform in sorted(deps.platformExts):
+        alldeps = set()
+        exts = set(deps.platformExts[platform])
+
+        # Track all extensions in platform headers, to exclude them from
+        # core headers.
+        allPlatformExtensions |= exts
+
+        # Combine direct dependencies and interactions of each platform
+        # extension
+        for ext in sorted(exts):
+            interactions = deps.interactions(ext)
+            alldeps |= interactions
+
+        # Remove interactions which are in the set of platform extensions
+        alldeps -= exts
+
+        if platform == 'provisional':
+            headername = 'vulkan_beta.h'
+        else:
+            headername = f'vulkan_{platform}.h'
+
+        addPlatformExtensionsRE = makeREstring(exts | alldeps)
+        emitPlatformExtensionsRE = makeREstring(exts)
+
+        opts = CGeneratorOptions(
+            conventions       = conventions,
+            filename          = headername,
+            directory         = directory,
+            genpath           = None,
+            apiname           = defaultAPIName,
+            mergeApiNames     = mergeApiNames,
+            mergeInternalApis = mergeInternalApis,
+            profile           = None,
+            versions          = featuresPat,
+            emitversions      = None,
+            defaultExtensions = None,
+            addExtensions     = addPlatformExtensionsRE,
+            removeExtensions  = removeExtensionsPat,
+            emitExtensions    = emitPlatformExtensionsRE,
+            # Platform extensions set respectAllowDepends so they do not
+            # pull in definitions that are duplicated in vulkan_core.h.
+            respectAllowDepends = True,
+            prefixText        = prefixStrings + vkPrefixStrings,
+            genFuncPointers   = True,
+            protectFile       = protectFile,
+            protectFeature    = False,
+            protectProto      = '#ifndef',
+            protectProtoStr   = 'VK_NO_PROTOTYPES',
+            protectExportName    = defaultAPIName,
+            protectExportProtoStr = 'VK_ONLY_EXPORTED_PROTOTYPES',
+            apicall           = 'VKAPI_ATTR ',
+            apientry          = 'VKAPI_CALL ',
+            apientryp         = 'VKAPI_PTR *',
+            alignFuncParam    = 48,
+            misracstyle       = misracstyle,
+            misracppstyle     = misracppstyle)
+
+        genOpts[headername] = [ COutputGenerator, opts ]
+
+    # Header for core API + extensions.
+    # To generate just the core API,
+    # change to 'defaultExtensions = None' below.
+    #
+    # By default this adds all enabled, non-platform extensions.
+    # It removes all platform extensions (from the platform headers options
+    # constructed above) as well as any explicitly specified removals.
+
+    removeExtensionsPat = makeREstring(
+        allPlatformExtensions | removeExtensions, None, strings_are_regex=True)
+
+    genOpts['vulkan_core.h'] = [
+          COutputGenerator,
+          CGeneratorOptions(
+            conventions       = conventions,
+            filename          = 'vulkan_core.h',
+            directory         = directory,
+            genpath           = None,
+            apiname           = defaultAPIName,
+            mergeApiNames     = mergeApiNames,
+            mergeInternalApis = mergeInternalApis,
+            profile           = None,
+            versions          = featuresPat,
+            emitversions      = featuresPat,
+            defaultExtensions = defaultExtensions,
+            addExtensions     = addExtensionsPat,
+            removeExtensions  = removeExtensionsPat,
+            emitExtensions    = emitExtensionsPat,
+            prefixText        = prefixStrings + vkPrefixStrings,
+            genFuncPointers   = True,
+            protectFile       = protectFile,
+            protectFeature    = False,
+            protectProto      = '#ifndef',
+            protectProtoStr   = 'VK_NO_PROTOTYPES',
+            protectExportName    = 'vulkan',
+            protectExportProtoStr = 'VK_ONLY_EXPORTED_PROTOTYPES',
+            apicall           = 'VKAPI_ATTR ',
+            apientry          = 'VKAPI_CALL ',
+            apientryp         = 'VKAPI_PTR *',
+            alignFuncParam    = 48,
+            misracstyle       = misracstyle,
+            misracppstyle     = misracppstyle)
+        ]
+
+    genOpts['vulkan_base_core.h'] = [
+          COutputGenerator,
+          CGeneratorOptions(
+            conventions       = conventions,
+            filename          = 'vulkan_base_core.h',
+            directory         = directory,
+            genpath           = None,
+            apiname           = defaultAPIName,
+            mergeApiNames     = mergeApiNames,
+            mergeInternalApis = mergeInternalApis,
+            profile           = None,
+            versions          = featuresPat,
+            emitversions      = featuresPat,
+            defaultExtensions = defaultExtensions,
+            addExtensions     = addExtensionsPat,
+            removeExtensions  = removeExtensionsPat,
+            emitExtensions    = emitExtensionsPat,
+            prefixText        = prefixStrings + vkPrefixStrings,
+            genFuncPointers   = True,
+            protectFile       = protectFile,
+            protectFeature    = False,
+            protectProto      = '#ifndef',
+            protectProtoStr   = 'VK_NO_PROTOTYPES',
+            apicall           = 'VKAPI_ATTR ',
+            apientry          = 'VKAPI_CALL ',
+            apientryp         = 'VKAPI_PTR *',
+            alignFuncParam    = 48,
+            misracstyle       = misracstyle,
+            misracppstyle     = misracppstyle)
+        ]
+
+    # Vulkan versions to include for SC header - SC *removes* features from 1.0/1.1/1.2
+    scVersions = makeREstring(['VK_BASE_VERSION_1_0', 'VK_COMPUTE_VERSION_1_0', 'VK_GRAPHICS_VERSION_1_0', 'VK_VERSION_1_0', 'VK_BASE_VERSION_1_1', 'VK_COMPUTE_VERSION_1_1', 'VK_GRAPHICS_VERSION_1_1', 'VK_VERSION_1_1', 'VK_BASE_VERSION_1_2', 'VK_COMPUTE_VERSION_1_2', 'VK_GRAPHICS_VERSION_1_2', 'VK_VERSION_1_2', 'VKSC_VERSION_1_0'])
+
+    genOpts['vulkan_sc_core.h'] = [
+          COutputGenerator,
+          CGeneratorOptions(
+            conventions       = conventions,
+            filename          = 'vulkan_sc_core.h',
+            directory         = directory,
+            apiname           = 'vulkansc',
+            mergeInternalApis = mergeInternalApis,
+            profile           = None,
+            versions          = scVersions,
+            emitversions      = scVersions,
+            defaultExtensions = defaultExtensions,
+            addExtensions     = addExtensionsPat,
+            removeExtensions  = removeExtensionsPat,
+            emitExtensions    = emitExtensionsPat,
+            prefixText        = prefixStrings + vkPrefixStrings,
+            genFuncPointers   = True,
+            protectFile       = protectFile,
+            protectFeature    = False,
+            protectProto      = '#ifndef',
+            protectProtoStr   = 'VK_NO_PROTOTYPES',
+            protectExportName    = defaultAPIName,
+            protectExportProtoStr = 'VK_ONLY_EXPORTED_PROTOTYPES',
+            apicall           = 'VKAPI_ATTR ',
+            apientry          = 'VKAPI_CALL ',
+            apientryp         = 'VKAPI_PTR *',
+            alignFuncParam    = 48,
+            misracstyle       = misracstyle,
+            misracppstyle     = misracppstyle)
+        ]
+
+    genOpts['vulkan_sc_core.hpp'] = [
+          COutputGenerator,
+          CGeneratorOptions(
+            conventions       = conventions,
+            filename          = 'vulkan_sc_core.hpp',
+            directory         = directory,
+            apiname           = 'vulkansc',
+            mergeInternalApis = mergeInternalApis,
+            profile           = None,
+            versions          = scVersions,
+            emitversions      = scVersions,
+            defaultExtensions = defaultExtensions,
+            addExtensions     = addExtensionsPat,
+            removeExtensions  = removeExtensionsPat,
+            emitExtensions    = emitExtensionsPat,
+            prefixText        = prefixStrings + vkPrefixStrings,
+            genFuncPointers   = True,
+            protectFile       = protectFile,
+            protectFeature    = False,
+            protectProto      = '#ifndef',
+            protectProtoStr   = 'VK_NO_PROTOTYPES',
+            protectExportName    = defaultAPIName,
+            protectExportProtoStr = 'VK_ONLY_EXPORTED_PROTOTYPES',
+            apicall           = 'VKAPI_ATTR ',
+            apientry          = 'VKAPI_CALL ',
+            apientryp         = 'VKAPI_PTR *',
+            alignFuncParam    = 48,
+            misracstyle       = misracstyle,
+            misracppstyle     = misracppstyle)
+        ]
+
+    # Unused - vulkan10.h target.
+    # It is possible to generate a header with just the Vulkan 1.0 +
+    # extension interfaces defined, but since the promoted KHR extensions
+    # are now defined in terms of the 1.1 interfaces, such a header is very
+    # similar to vulkan_core.h.
+    genOpts['vulkan10.h'] = [
+          COutputGenerator,
+          CGeneratorOptions(
+            conventions       = conventions,
+            filename          = 'vulkan10.h',
+            directory         = directory,
+            genpath           = None,
+            apiname           = defaultAPIName,
+            mergeInternalApis = mergeInternalApis,
+            profile           = None,
+            versions          = 'VK_VERSION_1_0',
+            emitversions      = 'VK_VERSION_1_0',
+            defaultExtensions = None,
+            addExtensions     = None,
+            removeExtensions  = None,
+            emitExtensions    = None,
+            prefixText        = prefixStrings + vkPrefixStrings,
+            genFuncPointers   = True,
+            protectFile       = protectFile,
+            protectFeature    = False,
+            protectProto      = '#ifndef',
+            protectProtoStr   = 'VK_NO_PROTOTYPES',
+            apicall           = 'VKAPI_ATTR ',
+            apientry          = 'VKAPI_CALL ',
+            apientryp         = 'VKAPI_PTR *',
+            alignFuncParam    = 48,
+            misracstyle       = misracstyle,
+            misracppstyle     = misracppstyle)
+        ]
+
+    # Video header target - combines all video extension dependencies into a
+    # single header, at present.
+    genOpts['vk_video.h'] = [
+          COutputGenerator,
+          CGeneratorOptions(
+            conventions       = conventions,
+            filename          = 'vk_video.h',
+            directory         = directory,
+            genpath           = None,
+            apiname           = 'vulkan',
+            profile           = None,
+            versions          = None,
+            emitversions      = None,
+            defaultExtensions = defaultExtensions,
+            addExtensions     = addExtensionsPat,
+            removeExtensions  = removeExtensionsPat,
+            emitExtensions    = emitExtensionsPat,
+            prefixText        = prefixStrings + vkPrefixStrings,
+            genFuncPointers   = True,
+            protectFile       = protectFile,
+            protectFeature    = False,
+            protectProto      = '#ifndef',
+            protectProtoStr   = 'VK_NO_PROTOTYPES',
+            apicall           = '',
+            apientry          = '',
+            apientryp         = '',
+            alignFuncParam    = 48,
+            misracstyle       = misracstyle,
+            misracppstyle     = misracppstyle)
+    ]
+
+    # Video extension 'Std' interfaces, each in its own header files
+    # These are not Vulkan extensions, or a part of the Vulkan API at all.
+    # They are treated in a similar fashion for generation purposes, but
+    # all required APIs for each interface must be explicitly required.
+    #
+    # Each element of the videoStd[] array is an extension name defining an
+    # interface, and is also the basis for the generated header file name.
+
+    videoStd = [
+        'vulkan_video_codecs_common',
+        'vulkan_video_codec_h264std',
+        'vulkan_video_codec_h264std_decode',
+        'vulkan_video_codec_h264std_encode',
+        'vulkan_video_codec_h265std',
+        'vulkan_video_codec_h265std_decode',
+        'vulkan_video_codec_h265std_encode',
+        'vulkan_video_codec_vp9std',
+        'vulkan_video_codec_vp9std_decode',
+        'vulkan_video_codec_av1std',
+        'vulkan_video_codec_av1std_decode',
+        'vulkan_video_codec_av1std_encode',
+    ]
+
+    # Unused at present
+    # addExtensionRE = makeREstring(videoStd)
+    for codec in videoStd:
+        headername = f'{codec}.h'
+
+        # Consider all of the codecs 'extensions', but only emit this one
+        emitExtensionRE = makeREstring([codec])
+
+        opts = CGeneratorOptions(
+            conventions       = conventions,
+            filename          = headername,
+            directory         = directory,
+            genpath           = None,
+            apiname           = defaultAPIName,
+            mergeApiNames     = mergeApiNames,
+            profile           = None,
+            versions          = None,
+            emitversions      = None,
+            defaultExtensions = None,
+            addExtensions     = emitExtensionRE,
+            removeExtensions  = None,
+            emitExtensions    = emitExtensionRE,
+            requireDepends    = False,
+            prefixText        = prefixStrings + vkPrefixStrings,
+            genFuncPointers   = False,
+            protectFile       = protectFile,
+            protectFeature    = False,
+            alignFuncParam    = 48,
+            )
+
+        genOpts[headername] = [ COutputGenerator, opts ]
+
+    # Unused - vulkan11.h target.
+    # It is possible to generate a header with just the Vulkan 1.0 +
+    # extension interfaces defined, but since the promoted KHR extensions
+    # are now defined in terms of the 1.1 interfaces, such a header is very
+    # similar to vulkan_core.h.
+    genOpts['vulkan11.h'] = [
+          COutputGenerator,
+          CGeneratorOptions(
+            conventions       = conventions,
+            filename          = 'vulkan11.h',
+            directory         = directory,
+            genpath           = None,
+            apiname           = defaultAPIName,
+            mergeInternalApis = mergeInternalApis,
+            profile           = None,
+            versions          = '^VK_VERSION_1_[01]$',
+            emitversions      = '^VK_VERSION_1_[01]$',
+            defaultExtensions = None,
+            addExtensions     = None,
+            removeExtensions  = None,
+            emitExtensions    = None,
+            prefixText        = prefixStrings + vkPrefixStrings,
+            genFuncPointers   = True,
+            protectFile       = protectFile,
+            protectFeature    = False,
+            protectProto      = '#ifndef',
+            protectProtoStr   = 'VK_NO_PROTOTYPES',
+            apicall           = 'VKAPI_ATTR ',
+            apientry          = 'VKAPI_CALL ',
+            apientryp         = 'VKAPI_PTR *',
+            alignFuncParam    = 48,
+            misracstyle       = misracstyle,
+            misracppstyle     = misracppstyle)
+        ]
+
+    genOpts['alias.h'] = [
+          COutputGenerator,
+          CGeneratorOptions(
+            conventions       = conventions,
+            filename          = 'alias.h',
+            directory         = directory,
+            genpath           = None,
+            apiname           = defaultAPIName,
+            profile           = None,
+            versions          = featuresPat,
+            emitversions      = featuresPat,
+            defaultExtensions = defaultExtensions,
+            addExtensions     = None,
+            removeExtensions  = removeExtensionsPat,
+            emitExtensions    = emitExtensionsPat,
+            prefixText        = None,
+            genFuncPointers   = False,
+            protectFile       = False,
+            protectFeature    = False,
+            protectProto      = '',
+            protectProtoStr   = '',
+            apicall           = '',
+            apientry          = '',
+            apientryp         = '',
+            alignFuncParam    = 36)
+        ]
+
+
+def genTarget(args):
+    """Create an API generator and corresponding generator options based on
+    the requested target and command line options.
+
+    This is encapsulated in a function so it can be profiled and/or timed.
+    The args parameter is a parsed argument object containing the following
+    fields that are used:
+
+    - target - target to generate
+    - directory - directory to generate it in
+    - protect - True if re-inclusion wrappers should be created
+    - extensions - list of additional extensions to include in generated interfaces"""
+
+    # Create generator options with parameters specified on command line
+    makeGenOpts(args)
+
+    # Select a generator matching the requested target
+    if args.target in genOpts:
+        createGenerator = genOpts[args.target][0]
+        options = genOpts[args.target][1]
+
+        logDiag('* Building', options.filename)
+        logDiag('* options.apiname           =', options.apiname)
+        logDiag('* options.versions          =', options.versions)
+        logDiag('* options.emitversions      =', options.emitversions)
+        logDiag('* options.defaultExtensions =', options.defaultExtensions)
+        logDiag('* options.addExtensions     =', options.addExtensions)
+        logDiag('* options.removeExtensions  =', options.removeExtensions)
+        logDiag('* options.emitExtensions    =', options.emitExtensions)
+        logDiag('* options.emitSpirv         =', options.emitSpirv)
+        logDiag('* options.emitFormats       =', options.emitFormats)
+        logDiag('* options.emitDynamicState  =', options.emitDynamicState)
+
+        gen = createGenerator(errFile=errWarn,
+                              warnFile=errWarn,
+                              diagFile=diag)
+        return (gen, options)
+    else:
+        logErr('No generator options for unknown target:', args.target)
+        return None
+
+
+# -feature name
+# -extension name
+# For both, "name" may be a single name, or a space-separated list
+# of names, or a regular expression.
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('-apiname', action='store',
+                        default=None,
+                        help='Specify API to generate (defaults to repository-specific conventions object value)')
+    parser.add_argument('-mergeApiNames', action='store',
+                        default=None,
+                        help='Specify a comma separated list of APIs to merge into the target API')
+    parser.add_argument('-defaultExtensions', action='store',
+                        default=APIConventions().xml_api_name,
+                        help='Specify a single class of extensions to add to targets')
+    parser.add_argument('-extension', action='append',
+                        default=[],
+                        help='Specify an extension or extensions to add to targets')
+    parser.add_argument('-removeExtensions', action='append',
+                        default=[],
+                        help='Specify an extension or extensions to remove from targets')
+    parser.add_argument('-emitExtensions', action='append',
+                        default=[],
+                        help='Specify an extension or extensions to emit in targets')
+    parser.add_argument('-emitSpirv', action='append',
+                        default=[],
+                        help='Specify a SPIR-V extension or capability to emit in targets')
+    parser.add_argument('-emitFormats', action='append',
+                        default=[],
+                        help='Specify Vulkan Formats to emit in targets')
+    parser.add_argument('-emitDynamicState', action='append',
+                        default=[],
+                        help='Specify VkDynamicState to emit in targets')
+    parser.add_argument('-feature', action='append',
+                        default=[],
+                        help='Specify a core API feature name or names to add to targets')
+    parser.add_argument('-debug', action='store_true',
+                        help='Enable debugging')
+    parser.add_argument('-dump', action='store_true',
+                        help='Enable dump to stderr')
+    parser.add_argument('-diagfile', action='store',
+                        default=None,
+                        help='Write diagnostics to specified file')
+    parser.add_argument('-errfile', action='store',
+                        default=None,
+                        help='Write errors and warnings to specified file instead of stderr')
+    parser.add_argument('-noprotect', dest='protect', action='store_false',
+                        help='Disable inclusion protection in output headers')
+    parser.add_argument('-profile', action='store_true',
+                        help='Enable profiling')
+    parser.add_argument('-registry', action='store',
+                        default=APIConventions().registry_path,
+                        help=f'Use specified registry file (default {APIConventions().registry_path})')
+    parser.add_argument('-time', action='store_true',
+                        help='Enable timing')
+    parser.add_argument('-genpath', action='store', default='gen',
+                        help='Path to generated files')
+    parser.add_argument('-o', action='store', dest='directory',
+                        default='.',
+                        help='Create target and related files in specified directory')
+    parser.add_argument('target', metavar='target', nargs='?',
+                        help='Specify target')
+    parser.add_argument('-quiet', action='store_true', default=True,
+                        help='Suppress script output during normal execution.')
+    parser.add_argument('-verbose', action='store_false', dest='quiet', default=True,
+                        help='Enable script output during normal execution.')
+    parser.add_argument('-misracstyle', dest='misracstyle', action='store_true',
+                        help='generate MISRA C-friendly headers')
+    parser.add_argument('-misracppstyle', dest='misracppstyle', action='store_true',
+                        help='generate MISRA C++-friendly headers')
+    parser.add_argument('-no-internal-api-merging', dest='mergeInternalApis', action='store_false',
+                        default=True,
+                        help='Disable merging of internal APIs into public APIs')
+
+    args = parser.parse_args()
+
+    # Splits arguments which are space-separated lists.
+    # Convert lists of names into sets, since argparse does not support
+    # that.
+    args.feature = set(name for arg in args.feature for name in arg.split())
+    args.extension = set(name for arg in args.extension for name in arg.split())
+    args.removeExtensions = set(args.removeExtensions)
+    args.emitExtensions = set(args.emitExtensions)
+    #args.emitSpirv   = set(args.emitSpirv)
+    #args.emitFormats = set(args.emitFormats)
+
+    # create error/warning & diagnostic files
+    if args.errfile:
+        errWarn = open(args.errfile, 'w', encoding='utf-8')
+    else:
+        errWarn = sys.stderr
+
+    if args.diagfile:
+        diag = open(args.diagfile, 'w', encoding='utf-8')
+    else:
+        diag = None
+
+    if args.time:
+        # Log diagnostics and warnings
+        setLogFile(setDiag = True, setWarn = True, filename = '-')
+
+    # Create the API generator & generator options
+    (gen, options) = genTarget(args)
+
+    # Create the registry object with the specified generator and generator
+    # options. The options are set before XML loading as they may affect it.
+    reg = Registry(gen, options)
+
+    # Parse the specified registry XML into an ElementTree object
+    startTimer(args.time)
+    tree = etree.parse(args.registry)
+    endTimer(args.time, '* Time to make ElementTree =')
+
+    # Load the XML tree into the registry object
+    startTimer(args.time)
+    reg.loadElementTree(tree)
+    endTimer(args.time, '* Time to parse ElementTree =')
+
+    if args.dump:
+        logDiag('* Dumping registry to regdump.txt')
+        reg.dumpReg(filehandle=open('regdump.txt', 'w', encoding='utf-8'))
+
+    # Finally, use the output generator to create the requested target
+    if args.debug:
+        pdb.run('reg.apiGen()')
+    else:
+        startTimer(args.time)
+        reg.apiGen()
+        endTimer(args.time, f"* Time to generate {options.filename} =")
+
+    if not args.quiet:
+        logDiag('* Generated', options.filename)
